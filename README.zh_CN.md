@@ -2,7 +2,7 @@
 
 ![new-api](/web/default/public/logo.png)
 
-# New API
+# Tianmao API
 
 🍥 **新一代大模型网关与AI资产管理系统**
 
@@ -469,7 +469,7 @@ docker run --name new-api -d --restart always \
 
 <div align="center">
 
-### 💖 感谢使用 New API
+### 💖 感谢使用 Tianmao API
 
 如果这个项目对你有帮助，欢迎给我们一个 ⭐️ Star！
 

@@ -2,7 +2,7 @@
 
 ![new-api](/web/default/public/logo.png)
 
-# New API
+# Tianmao API
 
 🍥 **次世代大規模モデルゲートウェイとAI資産管理システム**
 
