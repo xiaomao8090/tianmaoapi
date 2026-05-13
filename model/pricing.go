@@ -174,9 +174,6 @@ func updatePricing() {
 		vendorMap[vendors[i].Id] = &vendors[i]
 	}
 
-	// 初始化默认供应商映射
-	initDefaultVendorMapping(metaMap, vendorMap, enableAbilities)
-
 	// 构建对前端友好的供应商列表
 	vendorsList = make([]PricingVendor, 0, len(vendorMap))
 	for _, v := range vendorMap {
@@ -293,17 +290,15 @@ func updatePricing() {
 			SupportedEndpointTypes: modelSupportEndpointTypes[model],
 		}
 
-		// 补充模型元数据（描述、标签、供应商、状态）
-		if meta, ok := metaMap[model]; ok {
-			// 若模型被禁用(status!=1)，则直接跳过，不返回给前端
-			if meta.Status != 1 {
-				continue
-			}
-			pricing.Description = meta.Description
-			pricing.Icon = meta.Icon
-			pricing.Tags = meta.Tags
-			pricing.VendorID = meta.VendorID
+		// 模型元数据必须存在且启用，否则不展示到模型广场
+		meta, ok := metaMap[model]
+		if !ok || meta.Status != 1 {
+			continue
 		}
+		pricing.Description = meta.Description
+		pricing.Icon = meta.Icon
+		pricing.Tags = meta.Tags
+		pricing.VendorID = meta.VendorID
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {
 			pricing.ModelPrice = modelPrice
