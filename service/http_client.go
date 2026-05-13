@@ -17,9 +17,30 @@ import (
 
 var (
 	httpClient      *http.Client
+	httpClientLock  sync.Mutex
 	proxyClientLock sync.Mutex
 	proxyClients    = make(map[string]*http.Client)
 )
+
+func newRelayTransport(proxyFunc func(*http.Request) (*url.URL, error)) *http.Transport {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          common.RelayMaxIdleConns,
+		MaxIdleConnsPerHost:   common.RelayMaxIdleConnsPerHost,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+		Proxy:                 proxyFunc,
+	}
+	if common.TLSInsecureSkipVerify {
+		transport.TLSClientConfig = common.InsecureTLSConfig
+	}
+	return transport
+}
 
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	fetchSetting := system_setting.GetFetchSetting()
@@ -34,15 +55,7 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 }
 
 func InitHttpClient() {
-	transport := &http.Transport{
-		MaxIdleConns:        common.RelayMaxIdleConns,
-		MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
-		ForceAttemptHTTP2:   true,
-		Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY env vars
-	}
-	if common.TLSInsecureSkipVerify {
-		transport.TLSClientConfig = common.InsecureTLSConfig
-	}
+	transport := newRelayTransport(http.ProxyFromEnvironment)
 
 	if common.RelayTimeout == 0 {
 		httpClient = &http.Client{
@@ -59,6 +72,14 @@ func InitHttpClient() {
 }
 
 func GetHttpClient() *http.Client {
+	if httpClient != nil {
+		return httpClient
+	}
+	httpClientLock.Lock()
+	defer httpClientLock.Unlock()
+	if httpClient == nil {
+		InitHttpClient()
+	}
 	return httpClient
 }
 
@@ -92,11 +113,10 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 	}
 
 	proxyClientLock.Lock()
+	defer proxyClientLock.Unlock()
 	if client, ok := proxyClients[proxyURL]; ok {
-		proxyClientLock.Unlock()
 		return client, nil
 	}
-	proxyClientLock.Unlock()
 
 	parsedURL, err := url.Parse(proxyURL)
 	if err != nil {
@@ -105,23 +125,13 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 
 	switch parsedURL.Scheme {
 	case "http", "https":
-		transport := &http.Transport{
-			MaxIdleConns:        common.RelayMaxIdleConns,
-			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
-			ForceAttemptHTTP2:   true,
-			Proxy:               http.ProxyURL(parsedURL),
-		}
-		if common.TLSInsecureSkipVerify {
-			transport.TLSClientConfig = common.InsecureTLSConfig
-		}
+		transport := newRelayTransport(http.ProxyURL(parsedURL))
 		client := &http.Client{
 			Transport:     transport,
 			CheckRedirect: checkRedirect,
 		}
 		client.Timeout = time.Duration(common.RelayTimeout) * time.Second
-		proxyClientLock.Lock()
 		proxyClients[proxyURL] = client
-		proxyClientLock.Unlock()
 		return client, nil
 
 	case "socks5", "socks5h":
@@ -145,9 +155,12 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 		}
 
 		transport := &http.Transport{
-			MaxIdleConns:        common.RelayMaxIdleConns,
-			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
-			ForceAttemptHTTP2:   true,
+			MaxIdleConns:          common.RelayMaxIdleConns,
+			MaxIdleConnsPerHost:   common.RelayMaxIdleConnsPerHost,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
@@ -158,9 +171,7 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 
 		client := &http.Client{Transport: transport, CheckRedirect: checkRedirect}
 		client.Timeout = time.Duration(common.RelayTimeout) * time.Second
-		proxyClientLock.Lock()
 		proxyClients[proxyURL] = client
-		proxyClientLock.Unlock()
 		return client, nil
 
 	default:

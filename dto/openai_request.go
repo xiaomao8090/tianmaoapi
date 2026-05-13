@@ -3,6 +3,8 @@ package dto
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
+	"path/filepath"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -337,8 +339,12 @@ func (m *MediaContent) GetFile() *MessageFile {
 			return m.File.(*MessageFile)
 		}
 		if itemMap, ok := m.File.(map[string]any); ok {
+			fileName := common.Interface2String(itemMap["file_name"])
+			if fileName == "" {
+				fileName = common.Interface2String(itemMap["filename"])
+			}
 			out := &MessageFile{
-				FileName: common.Interface2String(itemMap["file_name"]),
+				FileName: fileName,
 				FileData: common.Interface2String(itemMap["file_data"]),
 				FileId:   common.Interface2String(itemMap["file_id"]),
 			}
@@ -386,7 +392,7 @@ func (m *MediaContent) ToFileSource() types.FileSource {
 		if file == nil || file.FileData == "" {
 			return nil
 		}
-		return types.NewFileSourceFromData(file.FileData, "")
+		return types.NewFileSourceFromData(file.FileData, file.MimeTypeFromFileName())
 	case ContentTypeVideoUrl:
 		video := m.GetVideoUrl()
 		if video == nil || video.Url == "" {
@@ -416,6 +422,17 @@ type MessageFile struct {
 	FileName string `json:"filename,omitempty"`
 	FileData string `json:"file_data,omitempty"`
 	FileId   string `json:"file_id,omitempty"`
+}
+
+func (m *MessageFile) MimeTypeFromFileName() string {
+	if m == nil || m.FileName == "" {
+		return ""
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(m.FileName))
+	if idx := strings.Index(mimeType, ";"); idx >= 0 {
+		mimeType = mimeType[:idx]
+	}
+	return strings.TrimSpace(mimeType)
 }
 
 type MessageVideoUrl struct {
