@@ -1,0 +1,97 @@
+name: Deploy server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: tianmaoapi:latest
+          outputs: type=docker,dest=/tmp/tianmaoapi-image.tar
+
+      - name: Install SSH tools
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Upload image
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          sshpass -p "$SERVER_PASSWORD" scp -o StrictHostKeyChecking=no /tmp/tianmaoapi-image.tar "$SERVER_USER@$SERVER_HOST:/tmp/tianmaoapi-image.tar"
+
+      - name: Restart service
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          sshpass -p "$SERVER_PASSWORD" ssh -o StrictHostKeyChecking=no "$SERVER_USER@$SERVER_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          docker load -i /tmp/tianmaoapi-image.tar
+          rm -f /tmp/tianmaoapi-image.tar
+
+          compose_dir="$(docker inspect new-api --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
+          compose_files="$(docker inspect new-api --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+
+          if [ -n "$compose_dir" ] && [ -n "$compose_files" ]; then
+            first_file="${compose_files%%,*}"
+            case "$first_file" in
+              /*) compose_file="$first_file" ;;
+              *) compose_file="$compose_dir/$first_file" ;;
+            esac
+          else
+            compose_file=""
+            for candidate in /opt/new-api/docker-compose.yml /www/wwwroot/new-api/docker-compose.yml /root/new-api/docker-compose.yml; do
+              if [ -f "$candidate" ]; then
+                compose_file="$candidate"
+                compose_dir="$(dirname "$candidate")"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$compose_file" ] || [ ! -f "$compose_file" ]; then
+            echo "Cannot find docker-compose.yml for new-api"
+            exit 1
+          fi
+
+          cp "$compose_file" "$compose_file.bak.$(date +%Y%m%d%H%M%S)"
+          awk '
+            /^[[:space:]]{2}new-api:/ { in_service=1 }
+            in_service && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ && $1 != "new-api:" { in_service=0 }
+            in_service && /^[[:space:]]*image:[[:space:]]*/ {
+              sub(/image:.*/, "image: tianmaoapi:latest")
+              changed=1
+            }
+            { print }
+            END { if (!changed) exit 42 }
+          ' "$compose_file" > "$compose_file.tmp"
+          mv "$compose_file.tmp" "$compose_file"
+
+          cd "$compose_dir"
+          docker compose up -d --no-deps new-api
+          docker image prune -f
+          curl -fsS http://127.0.0.1:3000/api/status
+          REMOTE
