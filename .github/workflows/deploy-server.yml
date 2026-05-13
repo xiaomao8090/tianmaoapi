@@ -54,8 +54,23 @@ jobs:
           docker load -i /tmp/tianmaoapi-image.tar
           rm -f /tmp/tianmaoapi-image.tar
 
-          compose_dir="$(docker inspect new-api --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
-          compose_files="$(docker inspect new-api --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+          app_container="new-api"
+          if ! docker inspect "$app_container" >/dev/null 2>&1; then
+            app_container="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' | awk '
+              $0 ~ /(:|->)3000/ || $0 ~ /new-api/ || $0 ~ /tianmaoapi/ { print $1; exit }
+            ')"
+          fi
+
+          if [ -z "$app_container" ] || ! docker inspect "$app_container" >/dev/null 2>&1; then
+            echo "Cannot find running app container"
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            exit 1
+          fi
+
+          compose_dir="$(docker inspect "$app_container" --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
+          compose_files="$(docker inspect "$app_container" --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+          compose_service="$(docker inspect "$app_container" --format '{{ index .Config.Labels "com.docker.compose.service" }}' 2>/dev/null || true)"
+          [ -n "$compose_service" ] || compose_service="$app_container"
 
           if [ -n "$compose_dir" ] && [ -n "$compose_files" ]; then
             first_file="${compose_files%%,*}"
@@ -76,9 +91,9 @@ jobs:
 
           if [ -n "$compose_file" ] && [ -f "$compose_file" ]; then
             cp "$compose_file" "$compose_file.bak.$(date +%Y%m%d%H%M%S)"
-            awk '
-              /^[[:space:]]{2}new-api:/ { in_service=1 }
-              in_service && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ && $1 != "new-api:" { in_service=0 }
+            awk -v svc="$compose_service" '
+              $1 == svc ":" { in_service=1 }
+              in_service && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ && $1 != svc ":" { in_service=0 }
               in_service && /^[[:space:]]*image:[[:space:]]*/ {
                 sub(/image:.*/, "image: tianmaoapi:latest")
                 changed=1
@@ -89,14 +104,14 @@ jobs:
             mv "$compose_file.tmp" "$compose_file"
 
             cd "$compose_dir"
-            docker compose up -d --no-deps new-api
+            docker compose up -d --no-deps "$compose_service"
           else
             ts="$(date +%Y%m%d%H%M%S)"
-            backup="new-api-backup-$ts"
+            backup="$app_container-backup-$ts"
             env_file="/tmp/new-api.env.$ts"
             run_args=()
 
-            docker inspect new-api --format '{{range .Config.Env}}{{println .}}{{end}}' > "$env_file"
+            docker inspect "$app_container" --format '{{range .Config.Env}}{{println .}}{{end}}' > "$env_file"
 
             while IFS= read -r line; do
               [ -z "$line" ] && continue
@@ -105,7 +120,7 @@ jobs:
               host_ip="${host_target%:*}"
               host_port="${host_target##*:}"
               run_args+=("-p" "$host_ip:$host_port:$container_port")
-            done < <(docker port new-api)
+            done < <(docker port "$app_container")
 
             while IFS=$'\t' read -r mount_type source destination rw; do
               [ -z "$mount_type" ] && continue
@@ -114,33 +129,33 @@ jobs:
                 mount_spec="$mount_spec,readonly"
               fi
               run_args+=("--mount" "$mount_spec")
-            done < <(docker inspect new-api --format '{{range .Mounts}}{{printf "%s\t%s\t%s\t%v\n" .Type .Source .Destination .RW}}{{end}}')
+            done < <(docker inspect "$app_container" --format '{{range .Mounts}}{{printf "%s\t%s\t%s\t%v\n" .Type .Source .Destination .RW}}{{end}}')
 
-            network="$(docker inspect new-api --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' | head -n 1)"
-            restart_policy="$(docker inspect new-api --format '{{.HostConfig.RestartPolicy.Name}}')"
+            network="$(docker inspect "$app_container" --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' | head -n 1)"
+            restart_policy="$(docker inspect "$app_container" --format '{{.HostConfig.RestartPolicy.Name}}')"
             [ -z "$restart_policy" ] || [ "$restart_policy" = "no" ] && restart_policy="always"
 
-            docker stop new-api
-            docker rename new-api "$backup"
+            docker stop "$app_container"
+            docker rename "$app_container" "$backup"
 
             set +e
-            docker run -d --name new-api --restart "$restart_policy" --network "$network" --env-file "$env_file" "${run_args[@]}" tianmaoapi:latest --log-dir /app/logs
+            docker run -d --name "$app_container" --restart "$restart_policy" --network "$network" --env-file "$env_file" "${run_args[@]}" tianmaoapi:latest --log-dir /app/logs
             run_status=$?
             set -e
 
             if [ "$run_status" -ne 0 ]; then
-              docker rm -f new-api 2>/dev/null || true
-              docker rename "$backup" new-api
-              docker start new-api
+              docker rm -f "$app_container" 2>/dev/null || true
+              docker rename "$backup" "$app_container"
+              docker start "$app_container"
               exit "$run_status"
             fi
 
             sleep 8
             if ! curl -fsS http://127.0.0.1:3000/api/status; then
-              docker logs --tail 80 new-api || true
-              docker rm -f new-api
-              docker rename "$backup" new-api
-              docker start new-api
+              docker logs --tail 80 "$app_container" || true
+              docker rm -f "$app_container"
+              docker rename "$backup" "$app_container"
+              docker start "$app_container"
               exit 1
             fi
 
