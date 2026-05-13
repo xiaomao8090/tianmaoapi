@@ -23,6 +23,8 @@ jobs:
 
       - name: Build image
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: false
         with:
           context: .
           platforms: linux/amd64
@@ -72,26 +74,80 @@ jobs:
             done
           fi
 
-          if [ -z "$compose_file" ] || [ ! -f "$compose_file" ]; then
-            echo "Cannot find docker-compose.yml for new-api"
-            exit 1
+          if [ -n "$compose_file" ] && [ -f "$compose_file" ]; then
+            cp "$compose_file" "$compose_file.bak.$(date +%Y%m%d%H%M%S)"
+            awk '
+              /^[[:space:]]{2}new-api:/ { in_service=1 }
+              in_service && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ && $1 != "new-api:" { in_service=0 }
+              in_service && /^[[:space:]]*image:[[:space:]]*/ {
+                sub(/image:.*/, "image: tianmaoapi:latest")
+                changed=1
+              }
+              { print }
+              END { if (!changed) exit 42 }
+            ' "$compose_file" > "$compose_file.tmp"
+            mv "$compose_file.tmp" "$compose_file"
+
+            cd "$compose_dir"
+            docker compose up -d --no-deps new-api
+          else
+            ts="$(date +%Y%m%d%H%M%S)"
+            backup="new-api-backup-$ts"
+            env_file="/tmp/new-api.env.$ts"
+            run_args=()
+
+            docker inspect new-api --format '{{range .Config.Env}}{{println .}}{{end}}' > "$env_file"
+
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              container_port="${line%% -> *}"
+              host_target="${line#* -> }"
+              host_ip="${host_target%:*}"
+              host_port="${host_target##*:}"
+              run_args+=("-p" "$host_ip:$host_port:$container_port")
+            done < <(docker port new-api)
+
+            while IFS=$'\t' read -r mount_type source destination rw; do
+              [ -z "$mount_type" ] && continue
+              mount_spec="type=$mount_type,src=$source,dst=$destination"
+              if [ "$rw" != "true" ]; then
+                mount_spec="$mount_spec,readonly"
+              fi
+              run_args+=("--mount" "$mount_spec")
+            done < <(docker inspect new-api --format '{{range .Mounts}}{{printf "%s\t%s\t%s\t%v\n" .Type .Source .Destination .RW}}{{end}}')
+
+            network="$(docker inspect new-api --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' | head -n 1)"
+            restart_policy="$(docker inspect new-api --format '{{.HostConfig.RestartPolicy.Name}}')"
+            [ -z "$restart_policy" ] || [ "$restart_policy" = "no" ] && restart_policy="always"
+
+            docker stop new-api
+            docker rename new-api "$backup"
+
+            set +e
+            docker run -d --name new-api --restart "$restart_policy" --network "$network" --env-file "$env_file" "${run_args[@]}" tianmaoapi:latest --log-dir /app/logs
+            run_status=$?
+            set -e
+
+            if [ "$run_status" -ne 0 ]; then
+              docker rm -f new-api 2>/dev/null || true
+              docker rename "$backup" new-api
+              docker start new-api
+              exit "$run_status"
+            fi
+
+            sleep 8
+            if ! curl -fsS http://127.0.0.1:3000/api/status; then
+              docker logs --tail 80 new-api || true
+              docker rm -f new-api
+              docker rename "$backup" new-api
+              docker start new-api
+              exit 1
+            fi
+
+            docker rm -f "$backup"
+            rm -f "$env_file"
           fi
 
-          cp "$compose_file" "$compose_file.bak.$(date +%Y%m%d%H%M%S)"
-          awk '
-            /^[[:space:]]{2}new-api:/ { in_service=1 }
-            in_service && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ && $1 != "new-api:" { in_service=0 }
-            in_service && /^[[:space:]]*image:[[:space:]]*/ {
-              sub(/image:.*/, "image: tianmaoapi:latest")
-              changed=1
-            }
-            { print }
-            END { if (!changed) exit 42 }
-          ' "$compose_file" > "$compose_file.tmp"
-          mv "$compose_file.tmp" "$compose_file"
-
-          cd "$compose_dir"
-          docker compose up -d --no-deps new-api
           docker image prune -f
           curl -fsS http://127.0.0.1:3000/api/status
           REMOTE
