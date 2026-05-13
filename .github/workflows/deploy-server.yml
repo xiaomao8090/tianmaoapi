@@ -54,6 +54,16 @@ jobs:
           docker load -i /tmp/tianmaoapi-image.tar
           rm -f /tmp/tianmaoapi-image.tar
 
+          wait_health() {
+            for _ in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/api/status; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
           app_container="new-api"
           if ! docker inspect "$app_container" >/dev/null 2>&1; then
             app_container="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' | awk '
@@ -105,6 +115,7 @@ jobs:
 
             cd "$compose_dir"
             docker compose up -d --no-deps "$compose_service"
+            wait_health
           else
             ts="$(date +%Y%m%d%H%M%S)"
             backup="$app_container-backup-$ts"
@@ -150,8 +161,7 @@ jobs:
               exit "$run_status"
             fi
 
-            sleep 8
-            if ! curl -fsS http://127.0.0.1:3000/api/status; then
+            if ! wait_health; then
               docker logs --tail 80 "$app_container" || true
               docker rm -f "$app_container"
               docker rename "$backup" "$app_container"
@@ -164,5 +174,4 @@ jobs:
           fi
 
           docker image prune -f
-          curl -fsS http://127.0.0.1:3000/api/status
           REMOTE
